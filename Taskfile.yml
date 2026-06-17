@@ -13,9 +13,9 @@ vars:
   PKG: "{{.MODULE}}/internal/build"
   LDFLAGS: >-
     -ldflags "-s -w
-    -X {{.PKG}}.Version={{.VERSION}}
-    -X {{.PKG}}.Commit={{.COMMIT}}
-    -X {{.PKG}}.BuildDate={{.BUILD_DATE}}"
+    -X '{{.PKG}}.Version={{.VERSION}}'
+    -X '{{.PKG}}.Commit={{.COMMIT}}'
+    -X '{{.PKG}}.BuildDate={{.BUILD_DATE}}'"
   DIST: dist
 
 tasks:
@@ -66,6 +66,31 @@ tasks:
     cmds:
       - go mod tidy
       - go mod verify
+
+  tag:
+    desc: "Create an annotated git tag and rebuild (usage: task tag V=v1.2.3)"
+    vars:
+      V: '{{.V | default ""}}'
+    preconditions:
+      - sh: test -n "{{.V}}"
+        msg: "VERSION is required — usage: task tag V=v1.2.3"
+      - sh: echo "{{.V}}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'
+        msg: "V must follow semver format: vMAJOR.MINOR.PATCH (e.g. v1.2.3)"
+      - sh: test -z "$(git tag -l '{{.V}}')"
+        msg: "Tag {{.V}} already exists"
+      - sh: git diff --quiet && git diff --cached --quiet
+        msg: "Working tree is dirty — commit or stash changes first"
+    cmds:
+      - git tag -a "{{.V}}" -m "{{.V}}"
+      - task: build
+        vars:
+          VERSION: "{{.V}}"
+          COMMIT:
+            sh: git rev-parse --short HEAD
+          BUILD_DATE:
+            sh: date -u +%Y-%m-%dT%H:%M:%SZ
+      - echo "Tagged {{.V}} — ./{{.BINARY}} version:"
+      - ./{{.BINARY}} version
 
   release:
     desc: Cross-compile for linux/amd64, linux/arm64, darwin/arm64, darwin/amd64, windows/amd64
