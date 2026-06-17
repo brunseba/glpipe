@@ -1,0 +1,103 @@
+version: "3"
+
+vars:
+  BINARY: glpipe
+  MODULE:
+    sh: go list -m
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo "none"
+  BUILD_DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  PKG: "{{.MODULE}}/internal/build"
+  LDFLAGS: >-
+    -ldflags "-s -w
+    -X {{.PKG}}.Version={{.VERSION}}
+    -X {{.PKG}}.Commit={{.COMMIT}}
+    -X {{.PKG}}.BuildDate={{.BUILD_DATE}}"
+  DIST: dist
+
+tasks:
+  default:
+    desc: Build the binary (local OS/arch)
+    cmds:
+      - task: build
+
+  build:
+    desc: Build the binary for the current platform
+    cmds:
+      - go build {{.LDFLAGS}} -o {{.BINARY}} .
+    sources:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+    generates:
+      - "{{.BINARY}}"
+
+  install:
+    desc: Build and install to $GOPATH/bin
+    cmds:
+      - go install {{.LDFLAGS}} .
+
+  clean:
+    desc: Remove built binary and dist/ folder
+    cmds:
+      - rm -f {{.BINARY}}
+      - rm -rf {{.DIST}}
+
+  test:
+    desc: Run all tests
+    cmds:
+      - go test ./...
+
+  lint:
+    desc: Run golangci-lint (must be installed)
+    cmds:
+      - golangci-lint run ./...
+
+  fmt:
+    desc: Format all Go files
+    cmds:
+      - gofmt -w .
+
+  tidy:
+    desc: Tidy and verify go modules
+    cmds:
+      - go mod tidy
+      - go mod verify
+
+  release:
+    desc: Cross-compile for linux/amd64, linux/arm64, darwin/arm64, darwin/amd64, windows/amd64
+    cmds:
+      - mkdir -p {{.DIST}}
+      - task: release:linux-amd64
+      - task: release:linux-arm64
+      - task: release:darwin-arm64
+      - task: release:darwin-amd64
+      - task: release:windows-amd64
+
+  release:linux-amd64:
+    internal: true
+    cmds:
+      - GOOS=linux GOARCH=amd64 go build {{.LDFLAGS}} -o {{.DIST}}/{{.BINARY}}-linux-amd64 .
+
+  release:linux-arm64:
+    internal: true
+    cmds:
+      - GOOS=linux GOARCH=arm64 go build {{.LDFLAGS}} -o {{.DIST}}/{{.BINARY}}-linux-arm64 .
+
+  release:darwin-arm64:
+    internal: true
+    cmds:
+      - GOOS=darwin GOARCH=arm64 go build {{.LDFLAGS}} -o {{.DIST}}/{{.BINARY}}-darwin-arm64 .
+
+  release:darwin-amd64:
+    internal: true
+    cmds:
+      - GOOS=darwin GOARCH=amd64 go build {{.LDFLAGS}} -o {{.DIST}}/{{.BINARY}}-darwin-amd64 .
+
+  release:windows-amd64:
+    internal: true
+    cmds:
+      - GOOS=windows GOARCH=amd64 go build {{.LDFLAGS}} -o {{.DIST}}/{{.BINARY}}-windows-amd64.exe .
