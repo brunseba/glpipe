@@ -71,6 +71,10 @@ tasks:
     desc: "Create an annotated git tag and rebuild (usage: task tag V=v1.2.3)"
     vars:
       V: '{{.V | default ""}}'
+      _COMMIT:
+        sh: git rev-parse --short HEAD
+      _DATE:
+        sh: date -u +%Y-%m-%dT%H:%M:%SZ
     preconditions:
       - sh: test -n "{{.V}}"
         msg: "VERSION is required — usage: task tag V=v1.2.3"
@@ -82,13 +86,13 @@ tasks:
         msg: "Working tree is dirty — commit or stash changes first"
     cmds:
       - git tag -a "{{.V}}" -m "{{.V}}"
-      - task: build
-        vars:
-          VERSION: "{{.V}}"
-          COMMIT:
-            sh: git rev-parse --short HEAD
-          BUILD_DATE:
-            sh: date -u +%Y-%m-%dT%H:%M:%SZ
+      - >-
+        go build
+        -ldflags "-s -w
+        -X '{{.PKG}}.Version={{.V}}'
+        -X '{{.PKG}}.Commit={{._COMMIT}}'
+        -X '{{.PKG}}.BuildDate={{._DATE}}'"
+        -o {{.BINARY}} .
       - echo "Tagged {{.V}} — ./{{.BINARY}} version:"
       - ./{{.BINARY}} version
 
