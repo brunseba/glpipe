@@ -19,9 +19,15 @@ type GitLab struct {
 	Token string `mapstructure:"token"`
 }
 
+type Group struct {
+	Name     string   `mapstructure:"name"`
+	Projects []string `mapstructure:"projects"` // list of project aliases or IDs
+}
+
 type Config struct {
 	GitLab   GitLab    `mapstructure:"gitlab"`
 	Projects []Project `mapstructure:"projects"`
+	Groups   []Group   `mapstructure:"groups"`
 }
 
 // DefaultDir returns ~/.glpipe
@@ -77,7 +83,7 @@ func Load(cfgFile string) (*Config, error) {
 	return &cfg, nil
 }
 
-// FindProject returns a project by alias or by ID (partial match).
+// FindProject returns a project by alias or ID.
 func (c *Config) FindProject(ref string) (*Project, error) {
 	for i := range c.Projects {
 		p := &c.Projects[i]
@@ -86,4 +92,42 @@ func (c *Config) FindProject(ref string) (*Project, error) {
 		}
 	}
 	return nil, fmt.Errorf("project %q not found in config", ref)
+}
+
+// FindGroup returns the projects belonging to a named group.
+func (c *Config) FindGroup(name string) ([]Project, error) {
+	for _, g := range c.Groups {
+		if g.Name != name {
+			continue
+		}
+		projects := make([]Project, 0, len(g.Projects))
+		for _, ref := range g.Projects {
+			p, err := c.FindProject(ref)
+			if err != nil {
+				return nil, fmt.Errorf("group %q: %w", name, err)
+			}
+			projects = append(projects, *p)
+		}
+		return projects, nil
+	}
+	return nil, fmt.Errorf("group %q not found in config", name)
+}
+
+// ResolveProjectsOrGroup returns the project list for --project or --group.
+// Exactly one of project/group must be non-empty, or neither (returns all projects).
+func (c *Config) ResolveTargets(project, group string) ([]Project, error) {
+	switch {
+	case project != "" && group != "":
+		return nil, fmt.Errorf("--project and --group are mutually exclusive")
+	case project != "":
+		p, err := c.FindProject(project)
+		if err != nil {
+			return nil, err
+		}
+		return []Project{*p}, nil
+	case group != "":
+		return c.FindGroup(group)
+	default:
+		return c.Projects, nil
+	}
 }

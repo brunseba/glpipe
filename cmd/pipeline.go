@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,29 +26,25 @@ var pipelineCmd = &cobra.Command{
 
 var (
 	listProject string
+	listGroup   string
 	listLimit   int
 	listStatus  string
 )
 
 var pipelineListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List recent pipelines (all projects or a specific one)",
+	Short: "List recent pipelines (all projects, a group, or a single project)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := gitlab.NewClient(cfg)
 		if err != nil {
 			return err
 		}
-
-		projects := cfg.Projects
-		if listProject != "" {
-			p, err := cfg.FindProject(listProject)
-			if err != nil {
-				return err
-			}
-			projects = []config.Project{*p}
+		projects, err := cfg.ResolveTargets(listProject, listGroup)
+		if err != nil {
+			return err
 		}
 
-		t := ui.NewTable(os.Stdout, []string{"Project", "ID", "Branch", "Status", "Triggered by", "Duration", "Created"})
+		t := ui.NewTable(os.Stdout, []string{"Project", "ID", "Branch", "Status", "Duration", "Created"})
 
 		for _, p := range projects {
 			opts := &gl.ListProjectPipelinesOptions{
@@ -72,7 +69,6 @@ var pipelineListCmd = &cobra.Command{
 					fmt.Sprintf("%d", pipe.ID),
 					pipe.Ref,
 					ui.ColorStatus(pipe.Status),
-					"-",
 					ui.FormatDuration(pipe.CreatedAt, pipe.UpdatedAt),
 					pipe.CreatedAt.Format("2006-01-02 15:04"),
 				})
@@ -86,6 +82,7 @@ var pipelineListCmd = &cobra.Command{
 
 var (
 	triggerProject    string
+	triggerGroup      string
 	triggerRef        string
 	triggerVars       []string
 	triggerPlayManual bool
@@ -94,38 +91,74 @@ var (
 
 var pipelineTriggerCmd = &cobra.Command{
 	Use:   "trigger",
-	Short: "Trigger a new pipeline on a project",
+	Short: "Trigger a new pipeline on a project or a group of projects",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client, err := gitlab.NewClient(cfg)
 		if err != nil {
 			return err
 		}
-		p, err := cfg.FindProject(triggerProject)
+		projects, err := cfg.ResolveTargets(triggerProject, triggerGroup)
 		if err != nil {
 			return err
 		}
-		ref := triggerRef
-		if ref == "" {
-			ref = p.DefaultBranch
+		if len(projects) == 0 {
+			return fmt.Errorf("no projects to trigger")
 		}
 
 		vars := parseVars(triggerVars)
 		glVars := buildGLVars(vars)
-		opts := &gl.CreatePipelineOptions{
-			Ref:       gl.Ptr(ref),
-			Variables: &glVars,
+
+		// Trigger all projects and collect pipeline IDs.
+		type result struct {
+			project config.Project
+			pipe    *gl.Pipeline
+			err     error
+		}
+		results := make([]result, len(projects))
+		for i, p := range projects {
+			ref := triggerRef
+			if ref == "" {
+				ref = p.DefaultBranch
+			}
+			pipe, _, trigErr := client.Pipelines.CreatePipeline(p.ID, &gl.CreatePipelineOptions{
+				Ref:       gl.Ptr(ref),
+				Variables: &glVars,
+			})
+			results[i] = result{project: p, pipe: pipe, err: trigErr}
 		}
 
-		pipe, _, err := client.Pipelines.CreatePipeline(p.ID, opts)
-		if err != nil {
-			return fmt.Errorf("triggering pipeline: %w", err)
+		// Report triggered pipelines.
+		var triggered []result
+		for _, r := range results {
+			if r.err != nil {
+				color.Red("✗ %s: %v", r.project.Alias, r.err)
+				continue
+			}
+			color.Green("✓ Pipeline #%d — %s @ %s  %s", r.pipe.ID, r.project.Alias, r.pipe.Ref, r.pipe.WebURL)
+			triggered = append(triggered, r)
 		}
 
-		color.Green("Pipeline #%d created on %s @ %s", pipe.ID, p.ID, ref)
-		fmt.Printf("URL: %s\n", pipe.WebURL)
+		if !triggerPlayManual || len(triggered) == 0 {
+			return nil
+		}
 
-		if triggerPlayManual {
-			return watchPipeline(client, p.ID, pipe.ID, triggerInterval, true)
+		// Watch all triggered pipelines concurrently.
+		fmt.Printf("\nWatching %d pipeline(s) with auto-play manual jobs...\n", len(triggered))
+		var wg sync.WaitGroup
+		errs := make(chan error, len(triggered))
+		for _, r := range triggered {
+			wg.Add(1)
+			go func(r result) {
+				defer wg.Done()
+				if err := watchPipelineLabeled(client, r.project, r.pipe.ID, triggerInterval); err != nil {
+					errs <- fmt.Errorf("%s: %w", r.project.Alias, err)
+				}
+			}(r)
+		}
+		wg.Wait()
+		close(errs)
+		for e := range errs {
+			color.Red("watch error: %v", e)
 		}
 		return nil
 	},
@@ -230,6 +263,48 @@ func watchPipeline(client *gl.Client, projectID string, pipelineID int64, interv
 	}
 }
 
+// watchPipelineLabeled is like watchPipeline but prefixes every log line with
+// the project alias — used when watching multiple pipelines concurrently.
+func watchPipelineLabeled(client *gl.Client, p config.Project, pipelineID int64, interval int) error {
+	label := p.Alias
+	if label == "" {
+		label = p.ID
+	}
+	tick := time.NewTicker(time.Duration(interval) * time.Second)
+	defer tick.Stop()
+
+	played := map[int64]bool{}
+	terminal := map[string]bool{"success": true, "failed": true, "canceled": true, "skipped": true}
+
+	for range tick.C {
+		pipe, _, err := client.Pipelines.GetPipeline(p.ID, pipelineID)
+		if err != nil {
+			return err
+		}
+		jobs, _, _ := client.Jobs.ListPipelineJobs(p.ID, pipelineID, &gl.ListJobsOptions{})
+
+		for _, j := range jobs {
+			if j.Status != "manual" || played[j.ID] {
+				continue
+			}
+			played[j.ID] = true
+			if _, _, err := client.Jobs.PlayJob(p.ID, j.ID, nil); err != nil {
+				fmt.Printf("[%s] auto-play job #%d (%s): %v\n", label, j.ID, j.Name, err)
+			} else {
+				fmt.Printf("[%s] auto-play job #%d (%s) triggered\n", label, j.ID, j.Name)
+			}
+		}
+
+		fmt.Printf("[%s] pipeline #%d — %s\n", label, pipe.ID, ui.ColorStatus(pipe.Status))
+
+		if terminal[pipe.Status] {
+			color.Green("[%s] finished: %s", label, pipe.Status)
+			return nil
+		}
+	}
+	return nil
+}
+
 // playManualJobs triggers any job in 'manual' state that hasn't been played yet.
 func playManualJobs(client *gl.Client, projectID string, jobs []*gl.Job, played map[int64]bool) {
 	for _, j := range jobs {
@@ -286,17 +361,18 @@ func buildGLVars(vars map[string]string) []*gl.PipelineVariableOptions {
 
 func init() {
 	// list
-	pipelineListCmd.Flags().StringVarP(&listProject, "project", "p", "", "project alias or ID (default: all)")
+	pipelineListCmd.Flags().StringVarP(&listProject, "project", "p", "", "project alias or ID")
+	pipelineListCmd.Flags().StringVarP(&listGroup, "group", "g", "", "project group name (defined in config)")
 	pipelineListCmd.Flags().IntVarP(&listLimit, "limit", "n", 10, "number of pipelines per project")
 	pipelineListCmd.Flags().StringVarP(&listStatus, "status", "s", "", "filter by status (running, success, failed, pending, canceled)")
 
 	// trigger
 	pipelineTriggerCmd.Flags().StringVarP(&triggerProject, "project", "p", "", "project alias or ID")
-	pipelineTriggerCmd.Flags().StringVarP(&triggerRef, "ref", "r", "", "branch or tag (default: project's default_branch)")
+	pipelineTriggerCmd.Flags().StringVarP(&triggerGroup, "group", "g", "", "project group name (defined in config)")
+	pipelineTriggerCmd.Flags().StringVarP(&triggerRef, "ref", "r", "", "branch or tag (default: each project's default_branch)")
 	pipelineTriggerCmd.Flags().StringArrayVarP(&triggerVars, "var", "v", nil, "pipeline variable in KEY=VALUE format (repeatable)")
-	pipelineTriggerCmd.Flags().BoolVar(&triggerPlayManual, "play-manual", false, "watch and automatically trigger manual jobs until pipeline finishes")
+	pipelineTriggerCmd.Flags().BoolVar(&triggerPlayManual, "play-manual", false, "watch and auto-play manual jobs until all pipelines finish")
 	pipelineTriggerCmd.Flags().IntVar(&triggerInterval, "interval", 5, "polling interval in seconds (used with --play-manual)")
-	_ = pipelineTriggerCmd.MarkFlagRequired("project")
 
 	// cancel
 	pipelineCancelCmd.Flags().StringVarP(&cancelProject, "project", "p", "", "project alias or ID")

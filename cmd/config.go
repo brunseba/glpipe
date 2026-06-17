@@ -90,4 +90,13 @@ projects:
   - id: mygroup/frontend
     alias: frontend
     default_branch: develop
+  - id: mygroup/infra
+    alias: infra
+    default_branch: main
+
+groups:
+  - name: apps
+    projects: [backend, frontend]
+  - name: all
+    projects: [backend, frontend, infra]
 `
