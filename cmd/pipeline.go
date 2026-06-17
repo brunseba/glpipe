@@ -85,9 +85,11 @@ var pipelineListCmd = &cobra.Command{
 // ── trigger ───────────────────────────────────────────────────────────────────
 
 var (
-	triggerProject string
-	triggerRef     string
-	triggerVars    []string
+	triggerProject    string
+	triggerRef        string
+	triggerVars       []string
+	triggerPlayManual bool
+	triggerInterval   int
 )
 
 var pipelineTriggerCmd = &cobra.Command{
@@ -121,6 +123,10 @@ var pipelineTriggerCmd = &cobra.Command{
 
 		color.Green("Pipeline #%d created on %s @ %s", pipe.ID, p.ID, ref)
 		fmt.Printf("URL: %s\n", pipe.WebURL)
+
+		if triggerPlayManual {
+			return watchPipeline(client, p.ID, pipe.ID, triggerInterval, true)
+		}
 		return nil
 	},
 }
@@ -174,49 +180,54 @@ var pipelineWatchCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		return watchPipeline(client, p.ID, watchPipelineID, watchInterval, watchPlayManual)
+	},
+}
 
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+// watchPipeline polls a pipeline until it reaches a terminal state.
+// If playManual is true, it triggers manual jobs as they appear.
+func watchPipeline(client *gl.Client, projectID string, pipelineID int64, interval int, playManual bool) error {
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sig)
 
-		tick := time.NewTicker(time.Duration(watchInterval) * time.Second)
-		defer tick.Stop()
+	tick := time.NewTicker(time.Duration(interval) * time.Second)
+	defer tick.Stop()
 
-		played := map[int64]bool{} // jobs already played, avoid double-trigger
+	played := map[int64]bool{}
 
-		fmt.Printf("Watching pipeline #%d on %s (interval %ds", watchPipelineID, p.ID, watchInterval)
-		if watchPlayManual {
-			fmt.Print(", auto-play manual jobs")
-		}
-		fmt.Println(")...")
+	fmt.Printf("Watching pipeline #%d on %s (interval %ds", pipelineID, projectID, interval)
+	if playManual {
+		fmt.Print(", auto-play manual jobs")
+	}
+	fmt.Println(")...")
 
-		for {
-			select {
-			case <-sig:
-				fmt.Println("\nStopped.")
+	terminal := map[string]bool{"success": true, "failed": true, "canceled": true, "skipped": true}
+
+	for {
+		select {
+		case <-sig:
+			fmt.Println("\nStopped.")
+			return nil
+		case <-tick.C:
+			pipe, _, err := client.Pipelines.GetPipeline(projectID, pipelineID)
+			if err != nil {
+				return err
+			}
+			jobs, _, _ := client.Jobs.ListPipelineJobs(projectID, pipelineID, &gl.ListJobsOptions{})
+
+			if playManual {
+				playManualJobs(client, projectID, jobs, played)
+			}
+
+			printWatchLine(pipe, jobs)
+
+			if terminal[pipe.Status] {
+				fmt.Printf("\nPipeline finished: %s\n", ui.ColorStatus(pipe.Status))
 				return nil
-			case <-tick.C:
-				pipe, _, err := client.Pipelines.GetPipeline(p.ID, watchPipelineID)
-				if err != nil {
-					return err
-				}
-				jobs, _, _ := client.Jobs.ListPipelineJobs(p.ID, watchPipelineID, &gl.ListJobsOptions{})
-
-				if watchPlayManual {
-					playManualJobs(client, p.ID, jobs, played)
-				}
-
-				printWatchLine(pipe, jobs)
-
-				terminal := []string{"success", "failed", "canceled", "skipped"}
-				for _, s := range terminal {
-					if pipe.Status == s {
-						fmt.Printf("\nPipeline finished: %s\n", ui.ColorStatus(pipe.Status))
-						return nil
-					}
-				}
 			}
 		}
-	},
+	}
 }
 
 // playManualJobs triggers any job in 'manual' state that hasn't been played yet.
@@ -283,6 +294,8 @@ func init() {
 	pipelineTriggerCmd.Flags().StringVarP(&triggerProject, "project", "p", "", "project alias or ID")
 	pipelineTriggerCmd.Flags().StringVarP(&triggerRef, "ref", "r", "", "branch or tag (default: project's default_branch)")
 	pipelineTriggerCmd.Flags().StringArrayVarP(&triggerVars, "var", "v", nil, "pipeline variable in KEY=VALUE format (repeatable)")
+	pipelineTriggerCmd.Flags().BoolVar(&triggerPlayManual, "play-manual", false, "watch and automatically trigger manual jobs until pipeline finishes")
+	pipelineTriggerCmd.Flags().IntVar(&triggerInterval, "interval", 5, "polling interval in seconds (used with --play-manual)")
 	_ = pipelineTriggerCmd.MarkFlagRequired("project")
 
 	// cancel
