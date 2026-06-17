@@ -1,0 +1,168 @@
+# GitLab CI example — testing glpipe against configured projects
+#
+# Required CI/CD variables (Settings > CI/CD > Variables):
+#   GITLAB_TOKEN  — personal access token with `api` scope (masked + protected)
+#   GITLAB_URL    — optional, defaults to https://gitlab.com
+#
+# Place this file as .gitlab-ci.yml in any repository that needs to drive
+# pipelines on the projects listed below.
+
+variables:
+  GLPIPE_VERSION: "v0.3.0"
+  GLPIPE_BIN: "./glpipe"
+  GITLAB_URL: "https://gitlab.com"
+
+# ── shared setup ──────────────────────────────────────────────────────────────
+
+.install_glpipe: &install_glpipe
+  before_script:
+    - |
+      curl -sSfL \
+        "https://github.com/brunseba/glpipe/releases/download/${GLPIPE_VERSION}/glpipe-linux-amd64" \
+        -o glpipe
+      chmod +x glpipe
+    - |
+      mkdir -p ~/.glpipe
+      chmod 700 ~/.glpipe
+      cat > ~/.glpipe/config.yaml <<EOF
+      gitlab:
+        url: "${GITLAB_URL}"
+        token: "${GITLAB_TOKEN}"
+      projects:
+        - id: thesparrowhawkofhills/prj-test-02
+          alias: backend
+          default_branch: main
+        - id: thesparrowhawkofhills/prj-test-01
+          alias: frontend
+          default_branch: main
+      EOF
+      chmod 600 ~/.glpipe/config.yaml
+    - ${GLPIPE_BIN} config validate
+
+# ── stages ────────────────────────────────────────────────────────────────────
+
+stages:
+  - validate
+  - observe
+  - trigger
+  - verify
+
+# ── validate ──────────────────────────────────────────────────────────────────
+
+config:validate:
+  stage: validate
+  image: alpine:3.20
+  <<: *install_glpipe
+  script:
+    - echo "=== Config validated ==="
+    - ${GLPIPE_BIN} version
+
+# ── observe ───────────────────────────────────────────────────────────────────
+
+status:all:
+  stage: observe
+  image: alpine:3.20
+  <<: *install_glpipe
+  script:
+    - echo "=== Global status ==="
+    - ${GLPIPE_BIN} status
+
+pipelines:backend:
+  stage: observe
+  image: alpine:3.20
+  <<: *install_glpipe
+  script:
+    - echo "=== Last 5 pipelines — backend ==="
+    - ${GLPIPE_BIN} pipeline list -p backend -n 5
+    - echo "=== Running pipelines — backend ==="
+    - ${GLPIPE_BIN} pipeline list -p backend -s running -n 5
+
+pipelines:frontend:
+  stage: observe
+  image: alpine:3.20
+  <<: *install_glpipe
+  script:
+    - echo "=== Last 5 pipelines — frontend ==="
+    - ${GLPIPE_BIN} pipeline list -p frontend -n 5
+    - echo "=== Running pipelines — frontend ==="
+    - ${GLPIPE_BIN} pipeline list -p frontend -s running -n 5
+
+# ── trigger ───────────────────────────────────────────────────────────────────
+
+pipeline:trigger:backend:
+  stage: trigger
+  image: alpine:3.20
+  <<: *install_glpipe
+  script:
+    - echo "=== Triggering pipeline on backend @ main ==="
+    - |
+      OUTPUT=$(${GLPIPE_BIN} pipeline trigger -p backend -r main)
+      echo "$OUTPUT"
+      PIPELINE_ID=$(echo "$OUTPUT" | grep -oE '#[0-9]+' | tr -d '#')
+      echo "PIPELINE_ID=${PIPELINE_ID}" > pipeline_backend.env
+  artifacts:
+    reports:
+      dotenv: pipeline_backend.env
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"       # only trigger on main branch
+    - if: $FORCE_TRIGGER == "true"          # or when explicitly requested
+
+pipeline:trigger:frontend:
+  stage: trigger
+  image: alpine:3.20
+  <<: *install_glpipe
+  script:
+    - echo "=== Triggering pipeline on frontend @ main ==="
+    - |
+      OUTPUT=$(${GLPIPE_BIN} pipeline trigger -p frontend -r main)
+      echo "$OUTPUT"
+      PIPELINE_ID=$(echo "$OUTPUT" | grep -oE '#[0-9]+' | tr -d '#')
+      echo "PIPELINE_ID=${PIPELINE_ID}" > pipeline_frontend.env
+  artifacts:
+    reports:
+      dotenv: pipeline_frontend.env
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $FORCE_TRIGGER == "true"
+
+# ── verify ────────────────────────────────────────────────────────────────────
+
+pipeline:watch:backend:
+  stage: verify
+  image: alpine:3.20
+  <<: *install_glpipe
+  needs:
+    - job: pipeline:trigger:backend
+      artifacts: true
+  script:
+    - echo "=== Watching pipeline #${PIPELINE_ID} on backend ==="
+    - |
+      ${GLPIPE_BIN} pipeline watch \
+        -p backend \
+        -i "${PIPELINE_ID}" \
+        --play-manual \
+        --interval 10
+  timeout: 30m
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $FORCE_TRIGGER == "true"
+
+pipeline:watch:frontend:
+  stage: verify
+  image: alpine:3.20
+  <<: *install_glpipe
+  needs:
+    - job: pipeline:trigger:frontend
+      artifacts: true
+  script:
+    - echo "=== Watching pipeline #${PIPELINE_ID} on frontend ==="
+    - |
+      ${GLPIPE_BIN} pipeline watch \
+        -p frontend \
+        -i "${PIPELINE_ID}" \
+        --play-manual \
+        --interval 10
+  timeout: 30m
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+    - if: $FORCE_TRIGGER == "true"
