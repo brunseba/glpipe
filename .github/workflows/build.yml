@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # required for git describe to find tags
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -61,10 +61,41 @@ jobs:
           path: ${{ matrix.binary }}
           retention-days: 7
 
+  sign:
+    name: Sign binaries (keyless)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # OIDC token for keyless signing
+      contents: read
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign binaries
+        run: |
+          for bin in glpipe-linux-amd64 glpipe-darwin-arm64; do
+            cosign sign-blob "$bin" \
+              --bundle "${bin}.bundle" \
+              --yes
+            echo "Signed: ${bin}.bundle"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundles
+          path: "*.bundle"
+          retention-days: 7
+
   release:
     name: GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, sign]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -83,3 +114,5 @@ jobs:
           files: |
             glpipe-linux-amd64
             glpipe-darwin-arm64
+            glpipe-linux-amd64.bundle
+            glpipe-darwin-arm64.bundle
