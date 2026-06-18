@@ -96,6 +96,41 @@ tasks:
       - echo "Tagged {{.V}} — ./{{.BINARY}} version:"
       - ./{{.BINARY}} version
 
+  verify:
+    desc: "Verify cosign signatures of dist/ binaries (usage: task verify [IDENTITY=email] [ISSUER=url])"
+    vars:
+      IDENTITY: '{{.IDENTITY | default "veille.informatique@lepervier.org"}}'
+      ISSUER:   '{{.ISSUER   | default "https://github.com/login/oauth"}}'
+    preconditions:
+      - sh: command -v cosign
+        msg: "cosign is required — install with: brew install cosign"
+      - sh: test -d {{.DIST}}
+        msg: "dist/ not found — run 'task release' then 'task sign' first"
+    cmds:
+      - |
+        ok=0; fail=0
+        for bin in {{.DIST}}/glpipe-*; do
+          [[ "$bin" == *.bundle ]] && continue
+          bundle="${bin}.bundle"
+          if [[ ! -f "$bundle" ]]; then
+            echo "  SKIP  $bin (no bundle)"
+            continue
+          fi
+          if cosign verify-blob "$bin" \
+              --bundle "$bundle" \
+              --certificate-identity "{{.IDENTITY}}" \
+              --certificate-oidc-issuer "{{.ISSUER}}" 2>/dev/null; then
+            echo "  OK    $bin"
+            ok=$((ok+1))
+          else
+            echo "  FAIL  $bin"
+            fail=$((fail+1))
+          fi
+        done
+        echo ""
+        echo "Result: ${ok} verified, ${fail} failed"
+        [[ $fail -eq 0 ]]
+
   sign:
     desc: Sign dist/ binaries with cosign keyless (opens browser for OIDC — requires cosign)
     preconditions:
