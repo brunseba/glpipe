@@ -20,9 +20,9 @@ vars:
 
 tasks:
   default:
-    desc: Build the binary (local OS/arch)
+    desc: Show available tasks
     cmds:
-      - task: build
+      - task --list
 
   build:
     desc: Build the binary for the current platform
