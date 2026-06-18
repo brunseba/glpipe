@@ -96,6 +96,21 @@ tasks:
       - echo "Tagged {{.V}} — ./{{.BINARY}} version:"
       - ./{{.BINARY}} version
 
+  sign:
+    desc: Sign dist/ binaries with cosign keyless (opens browser for OIDC — requires cosign)
+    preconditions:
+      - sh: command -v cosign
+        msg: "cosign is required — install with: brew install cosign"
+      - sh: test -d {{.DIST}}
+        msg: "dist/ not found — run 'task release' first"
+    cmds:
+      - |
+        for bin in {{.DIST}}/glpipe-*; do
+          [[ "$bin" == *.bundle ]] && continue
+          cosign sign-blob "$bin" --bundle "${bin}.bundle" --yes
+          echo "  signed: ${bin}.bundle"
+        done
+
   sbom:
     desc: Generate SBOM in CycloneDX and SPDX formats into dist/ (requires syft)
     preconditions:
