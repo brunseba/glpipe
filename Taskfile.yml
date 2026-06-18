@@ -96,6 +96,17 @@ tasks:
       - echo "Tagged {{.V}} — ./{{.BINARY}} version:"
       - ./{{.BINARY}} version
 
+  sbom:
+    desc: Generate SBOM in CycloneDX and SPDX formats into dist/ (requires syft)
+    preconditions:
+      - sh: command -v syft
+        msg: "syft is required — install with: brew install syft"
+    cmds:
+      - mkdir -p {{.DIST}}
+      - syft . --source-name {{.BINARY}} --source-version {{.VERSION}} --output cyclonedx-json={{.DIST}}/sbom.cyclonedx.json
+      - syft . --source-name {{.BINARY}} --source-version {{.VERSION}} --output spdx-json={{.DIST}}/sbom.spdx.json
+      - echo "SBOM written to {{.DIST}}/sbom.cyclonedx.json and {{.DIST}}/sbom.spdx.json"
+
   release:
     desc: Cross-compile for linux/amd64, linux/arm64, darwin/arm64, darwin/amd64, windows/amd64
     cmds:
