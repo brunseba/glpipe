@@ -253,11 +253,16 @@ Requires [Task](https://taskfile.dev) and Go ≥ 1.21.
 task build             # ./glpipe
 task install           # → $GOPATH/bin
 task release           # cross-compile → dist/
+task sign              # keyless cosign signing (requires cosign)
+task verify            # verify cosign signatures
+task sbom              # generate SBOM → dist/ (requires syft)
 task tag V=v1.2.3      # tag + rebuild
 task test
 task lint              # requires golangci-lint
 task clean
 ```
+
+See the [Taskfile Reference](docs/taskfile.md) for full documentation of every task.
 
 ---
 
